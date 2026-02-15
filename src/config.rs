@@ -14,6 +14,10 @@ pub struct AppConfig {
 
     /// Default TTS engine: "piper" or "xtts"
     pub default_tts_engine: String,
+    /// Path to the standalone piper binary
+    pub piper_binary_path: String,
+    /// Path to the directory containing piper shared libraries
+    pub piper_lib_path: String,
     pub piper_model_path: String,
     pub xtts_sidecar_url: String,
 
@@ -44,6 +48,10 @@ impl AppConfig {
                 .parse()?,
             default_tts_engine: std::env::var("DEFAULT_TTS_ENGINE")
                 .unwrap_or_else(|_| "piper".to_string()),
+            piper_binary_path: std::env::var("PIPER_BINARY_PATH")
+                .unwrap_or_else(|_| "./data/piper/piper".to_string()),
+            piper_lib_path: std::env::var("PIPER_LIB_PATH")
+                .unwrap_or_else(|_| "./data/piper".to_string()),
             piper_model_path: std::env::var("PIPER_MODEL_PATH")
                 .unwrap_or_else(|_| "./data/models/piper/en_US-amy-medium.onnx".to_string()),
             xtts_sidecar_url: std::env::var("XTTS_SIDECAR_URL")

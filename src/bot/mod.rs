@@ -18,10 +18,12 @@ pub struct AppState {
     pub stt: SttEngine,
     pub tts: TtsManager,
     pub llm: LlmClient,
+    /// Runtime model override (admin can change via /model command)
+    pub model_override: tokio::sync::RwLock<String>,
 }
 
 /// Build the teloxide update handler tree.
-pub fn build_handler() -> Handler<'static, DependencyMap, (), dptree::di::DependencySupplyError> {
+pub fn build_handler() -> Handler<'static, DependencyMap, Result<(), Box<dyn std::error::Error + Send + Sync>>, teloxide::dispatching::DpHandlerDescription> {
     let command_handler = Update::filter_message()
         .filter_command::<commands::BotCommand>()
         .endpoint(commands::handle_command);

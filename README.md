@@ -77,3 +77,29 @@ User → Telegram → Teloxide Handler
                       ↓
               TTS (Piper/XTTS) → Voice Reply
 ```
+
+## Troubleshooting
+
+### Database Error: `Peer authentication failed`
+If you see this error, it means you can't log in as `postgres` without sudo. To fix:
+1.  **Set a password** for the `postgres` user:
+    ```bash
+    sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'yourpassword';"
+    ```
+2.  Update `.env` with:
+    ```
+    DATABASE_URL=postgres://postgres:yourpassword@localhost:5432/tts_stt_bot
+    ```
+
+### Build Error: `linking with cc failed`
+Ensure you have `libclang-dev` (Ubuntu) or `clang-devel` (Fedora) and `ffmpeg` installed.
+
+**Fedora:**
+```bash
+sudo dnf install cmake pkg-config gcc-c++ clang-devel llvm-devel openssl-devel ffmpeg-free-devel
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install libclang-dev libssl-dev pkg-config build-essential ffmpeg
+```

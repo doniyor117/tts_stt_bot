@@ -18,36 +18,49 @@ impl Database {
     }
 
     pub async fn run_migrations(&self) -> anyhow::Result<()> {
-        // Inline migrations — create tables if they don't exist
+        // Each CREATE TABLE must be a separate query (Postgres doesn't allow
+        // multiple commands in a single prepared statement).
+
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS users (
+            r#"CREATE TABLE IF NOT EXISTS users (
                 id BIGINT PRIMARY KEY,
                 username TEXT,
                 profile_summary TEXT NOT NULL DEFAULT '',
                 settings JSONB NOT NULL DEFAULT '{}',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
 
-            CREATE TABLE IF NOT EXISTS conversations (
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS conversations (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 user_id BIGINT NOT NULL REFERENCES users(id),
                 title TEXT NOT NULL DEFAULT 'New Chat',
                 summary TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
 
-            CREATE TABLE IF NOT EXISTS messages (
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS messages (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 token_count INT NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
 
-            CREATE TABLE IF NOT EXISTS approval_requests (
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS approval_requests (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 command TEXT NOT NULL,
                 requester_id BIGINT NOT NULL,
@@ -55,14 +68,18 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'pending',
                 result TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);
-            "#,
+            )"#,
         )
         .execute(&self.pool)
         .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC)")
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }

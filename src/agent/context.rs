@@ -2,6 +2,7 @@ use uuid::Uuid;
 
 use crate::ai::llm::{ChatMessage, LlmClient};
 use crate::db::Database;
+use std::path::{Path, PathBuf};
 
 /// Manages conversation context: auto-pruning, summarization, and user profiling.
 pub struct ContextManager {
@@ -35,7 +36,7 @@ impl ContextManager {
         );
 
         // Get all messages
-        let messages = db.get_messages(conversation_id).await?;
+        let messages: Vec<crate::db::models::Message> = db.get_messages(conversation_id).await?;
         if messages.len() <= 4 {
             // Too few messages to prune meaningfully
             return Ok(false);
@@ -101,7 +102,7 @@ impl ContextManager {
         conversation_id: Uuid,
     ) -> anyhow::Result<()> {
         let user = db.get_or_create_user(user_id, None).await?;
-        let messages = db.get_messages(conversation_id).await?;
+        let messages: Vec<crate::db::models::Message> = db.get_messages(conversation_id).await?;
 
         // Only analyze last 10 messages
         let recent: Vec<&_> = messages.iter().rev().take(10).collect();

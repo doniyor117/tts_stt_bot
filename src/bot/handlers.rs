@@ -1,4 +1,3 @@
-use std::io::Cursor;
 use std::sync::Arc;
 use teloxide::net::Download;
 use teloxide::prelude::*;
@@ -13,12 +12,33 @@ use crate::ai::llm::{ChatMessage, LlmClient};
 use crate::ai::tts::TtsEngine;
 use crate::bot::AppState;
 
-/// Main message handler for both voice and text messages.
+/// Main message handler — wraps the inner logic in an error boundary
+/// so the user always gets feedback, even on errors.
 pub async fn handle_message(
     bot: Bot,
     msg: Message,
     state: Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Err(e) = handle_message_inner(&bot, &msg, &state).await {
+        tracing::error!("Handler error for chat {}: {:?}", msg.chat.id, e);
+        let error_msg = format!("⚠️ Something went wrong: {}", e);
+        // Truncate error message if too long
+        let truncated = if error_msg.len() > 4000 {
+            format!("{}...", &error_msg[..4000])
+        } else {
+            error_msg
+        };
+        let _ = bot.send_message(msg.chat.id, truncated).await;
+    }
+    Ok(())
+}
+
+/// Inner handler that does the actual work. Errors propagate to the outer handler.
+async fn handle_message_inner(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
     let username = msg.from.as_ref().and_then(|u| u.username.as_deref());
     let chat_id = msg.chat.id.0;
@@ -60,7 +80,7 @@ pub async fn handle_message(
 
     // ── 2. Get or create active conversation ───────────────────────
 
-    let settings = state.db.get_user_settings(user_id).await?;
+    let settings: serde_json::Value = state.db.get_user_settings(user_id).await?;
     let conv_id = match settings
         .get("active_conversation")
         .and_then(|v| v.as_str())
@@ -102,7 +122,7 @@ pub async fn handle_message(
 
     // ── 6. Build message history for LLM ───────────────────────────
 
-    let db_messages = state.db.get_messages(conv_id).await?;
+    let db_messages: Vec<crate::db::models::Message> = state.db.get_messages(conv_id).await?;
     let mut llm_messages = vec![ChatMessage {
         role: "system".to_string(),
         content: system_prompt,
@@ -115,12 +135,13 @@ pub async fn handle_message(
         });
     }
 
-    // ── 7. Call LLM ────────────────────────────────────────────────
+    // ── 7. Call LLM (with runtime model override) ──────────────────
 
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await?;
 
-    let response = state.llm.chat(&llm_messages).await?;
+    let current_model = state.model_override.read().await.clone();
+    let response = state.llm.chat_with_model(&llm_messages, &current_model).await?;
     let mut assistant_text = response.text.clone();
 
     // ── 8. Check for tool calls ────────────────────────────────────
@@ -138,7 +159,7 @@ pub async fn handle_message(
                         ExecutionResult::PendingApproval(approval_id) => {
                             // Send to admin group
                             crate::agent::approval::request_approval(
-                                &bot,
+                                bot,
                                 state.config.admin_group_id,
                                 cmd,
                                 user_id,
@@ -190,37 +211,73 @@ pub async fn handle_message(
         .save_message(conv_id, "assistant", &assistant_text, resp_tokens)
         .await?;
 
-    // ── 10. Determine response mode (text or voice) ────────────────
+    // ── 10. Determine response mode (text, voice, or auto) ─────────
 
-    if msg.voice().is_some() {
-        // Reply with voice
+    let response_mode = settings
+        .get("response_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+
+    let should_voice = match response_mode {
+        "text" => false,
+        "voice" => true,
+        _ /* auto */ => msg.voice().is_some(),
+    };
+
+    if should_voice {
+        // Reply with voice — truncate for TTS (long text overwhelms engines)
+        const TTS_MAX_CHARS: usize = 500;
+        let tts_text = if assistant_text.len() > TTS_MAX_CHARS {
+            // Truncate at a sentence boundary if possible
+            let truncated = &assistant_text[..TTS_MAX_CHARS];
+            truncated
+                .rfind(". ")
+                .map(|i| &assistant_text[..=i])
+                .unwrap_or(truncated)
+        } else {
+            assistant_text.as_str()
+        };
+
         let tts_engine_str = settings
             .get("tts_engine")
             .and_then(|v| v.as_str())
             .unwrap_or(&state.config.default_tts_engine);
         let engine = TtsEngine::from_str_loose(tts_engine_str);
 
-        match state.tts.speak(&assistant_text, &engine).await {
+        match state.tts.speak(tts_text, &engine).await {
             Ok(wav_bytes) => {
                 // Convert WAV to OGG for Telegram voice
-                let ogg_bytes = wav_to_ogg(&wav_bytes).await.unwrap_or(wav_bytes);
-                let voice = InputFile::memory(ogg_bytes).file_name("response.ogg");
-                bot.send_voice(msg.chat.id, voice).await?;
+                match wav_to_ogg(&wav_bytes).await {
+                    Ok(ogg_bytes) => {
+                        let voice = InputFile::memory(ogg_bytes).file_name("response.ogg");
+                        bot.send_voice(msg.chat.id, voice).await?;
+                    }
+                    Err(e) => {
+                        tracing::error!("WAV→OGG conversion failed: {}", e);
+                        send_long_message(bot, msg.chat.id, &assistant_text).await?;
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!("TTS failed: {}", e);
                 // Fallback to text
-                bot.send_message(msg.chat.id, &assistant_text).await?;
+                send_long_message(bot, msg.chat.id, &assistant_text).await?;
             }
         }
+
+        // If the response was truncated for TTS, also send full text
+        if assistant_text.len() > TTS_MAX_CHARS {
+            send_long_message(bot, msg.chat.id, &assistant_text).await?;
+        }
     } else {
-        // Reply with text
-        bot.send_message(msg.chat.id, &assistant_text).await?;
+        // Reply with text (split if too long)
+        send_long_message(bot, msg.chat.id, &assistant_text).await?;
     }
+
 
     // ── 11. Periodically update user profile (every ~10 messages) ──
 
-    let msg_count = state.db.get_messages(conv_id).await?.len();
+    let msg_count = state.db.get_messages(conv_id).await.map(|m: Vec<crate::db::models::Message>| m.len()).unwrap_or(0);
     if msg_count % 10 == 0 && msg_count > 0 {
         let db_clone = state.db.clone();
         let llm_clone_config = state.config.clone();
@@ -231,6 +288,40 @@ pub async fn handle_message(
                 tracing::error!("Profile update failed: {}", e);
             }
         });
+    }
+
+    Ok(())
+}
+
+/// Send a message that may exceed Telegram's 4096 character limit
+/// by splitting it into multiple messages.
+async fn send_long_message(bot: &Bot, chat_id: ChatId, text: &str) -> anyhow::Result<()> {
+    const MAX_LEN: usize = 4096;
+
+    if text.len() <= MAX_LEN {
+        bot.send_message(chat_id, text).await?;
+        return Ok(());
+    }
+
+    // Split into chunks, preferring to break at newlines
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.len() <= MAX_LEN {
+            bot.send_message(chat_id, remaining).await?;
+            break;
+        }
+
+        // Find a good split point (last newline before limit, or last space)
+        let chunk_end = remaining[..MAX_LEN]
+            .rfind('\n')
+            .or_else(|| remaining[..MAX_LEN].rfind(' '))
+            .unwrap_or(MAX_LEN);
+
+        let (chunk, rest) = remaining.split_at(chunk_end);
+        bot.send_message(chat_id, chunk).await?;
+
+        // Skip the newline/space we split on
+        remaining = rest.trim_start();
     }
 
     Ok(())

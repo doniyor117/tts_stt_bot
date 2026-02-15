@@ -52,14 +52,27 @@ pub struct LlmResponse {
 impl LlmClient {
     pub fn new(config: &AppConfig) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
             api_key: config.groq_api_key.clone(),
             model: config.groq_model.clone(),
         }
     }
 
+    /// Get the default model name.
+    pub fn default_model(&self) -> &str {
+        &self.model
+    }
+
     /// Send a conversation to Groq and get the assistant's reply.
     pub async fn chat(&self, messages: &[ChatMessage]) -> anyhow::Result<LlmResponse> {
+        self.chat_with_model(messages, &self.model).await
+    }
+
+    /// Send a conversation to Groq using a specific model.
+    pub async fn chat_with_model(&self, messages: &[ChatMessage], model: &str) -> anyhow::Result<LlmResponse> {
         let groq_messages: Vec<GroqMessage> = messages
             .iter()
             .map(|m| GroqMessage {
@@ -69,7 +82,7 @@ impl LlmClient {
             .collect();
 
         let body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": groq_messages,
             "temperature": 0.7,
             "max_tokens": 2048,
@@ -109,3 +122,4 @@ impl LlmClient {
         (text.len() as f64 / 4.0).ceil() as i32
     }
 }
+
